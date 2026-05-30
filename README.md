@@ -42,11 +42,20 @@ editor = PowerPointEditor('input.pptx')
 slide = editor.duplicate_template_slide('RESERVE_WATERFALL')
 slide.edit_textbox_html('AOM Text', '<b>Updated</b>')
 slide.edit_embedded_workbook_for_chart('Waterfall chart', ['A','B'], [1,2])
+slide.edit_chart_data_multi_series(
+    'Multi-series chart',
+    ['Q1', 'Q2', 'Q3', 'Q4'],
+    {
+        'Revenue': [10, 20, 30, 40],
+        'Cost': [4, 8, 12, 16],
+    },
+)
 
 # Alternatively obtain a proxy for an existing slide number
 proxy = editor.get_slide(5)
 proxy.edit_textbox('Title', 'Hello')
 
+editor.drop_section('template_slides')
 editor.save('output.pptx')
 ```
 
@@ -69,7 +78,8 @@ slide.edit_table_cell('SummaryTable', 0, 1, 'Updated')
 The `SlideProxy` exposes convenience methods delegating to the editor for common
 per-slide operations: `edit_textbox`, `edit_textbox_html`, `edit_textbox_runs`,
 `remove_shape`, `edit_table_cell`, `edit_table_range`, `edit_chart_data`,
-`edit_waterfall_data`, `edit_embedded_workbook_for_chart`, and `refresh_chart`.
+`edit_chart_data_multi_series`, `edit_waterfall_data`,
+`edit_embedded_workbook_for_chart`, and `refresh_chart`.
 
 CLI example
 
@@ -119,6 +129,7 @@ PowerPointEditor
   - `find_slide_by_shape_name(shape_name: str) -> int`: Find a slide containing a named shape (returns slide number).
   - `duplicate_slide(template_slide_number: int, before_section_name: Optional[str]) -> int`: Duplicate a slide; returns new slide number.
   - `duplicate_template_slide(template_name: str, before_section_name: str='template_slides') -> SlideProxy`: Duplicate a template slide marked with `TEMPLATE__<name>` and return a `SlideProxy` bound to the new slide for convenient edits.
+  - `drop_section(section_name: str, delete_slide_parts: bool=True) -> list[int]`: Remove a section and its slides; by default also deletes now-unreferenced private slide dependencies.
   - `remove_shape_on_slide(slide_number: int, shape_name: str) -> None`: Remove a named shape or graphic frame from a slide.
 - **Text editing**
   - `find_textbox_anywhere(textbox_name: str) -> dict`: Locate a textbox by name (returns `slide_number` and `slide_part`).
@@ -130,8 +141,9 @@ PowerPointEditor
   - `find_chart_on_slide(slide_number: int, chart_name: str) -> dict`: Locate a chart frame and return `chart_part` and rel information.
   - `find_chart_anywhere(chart_name: str) -> dict`: Search all slides for a chart by name.
   - `edit_chart_data_on_slide(slide_number: int, chart_name: str, categories: list[str], values: list[float]) -> None`: Update chart caches and the embedded workbook for a regular chart when one is present.
+  - `edit_chart_data_multi_series_on_slide(slide_number: int, chart_name: str, categories: list[str], series: dict[str, list[float]], sheet_name: Optional[str]=None) -> None`: Update a regular chart that already has multiple series; the template chart must contain the same number of series as the provided mapping.
   - `edit_embedded_workbook_for_chart_on_slide(slide_number: int, chart_name: str, categories: list[str], values: list[float], sheet_name: Optional[str]=None, subtotal_indices: Optional[list[int]]=None) -> None`: Update the embedded Excel file and chart XML (supports chartex subtotal indices).
-  - Backward-compatible helpers: `edit_chart_data(...)`, `edit_waterfall_data(...)`, `edit_embedded_workbook_for_chart(...)`.
+  - Backward-compatible helpers: `edit_chart_data(...)`, `edit_chart_data_multi_series(...)`, `edit_waterfall_data(...)`, `edit_embedded_workbook_for_chart(...)`.
   - `refresh_chart(chart_name: str, output_pptx: str) -> None`: Attempt to refresh chart visuals using PowerPoint COM automation (Windows only).
 - **Tables**
   - `find_table_on_slide(slide_number: int, table_name: str) -> dict`: Locate a table graphicFrame by shape name.

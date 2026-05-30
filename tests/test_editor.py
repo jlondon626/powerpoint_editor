@@ -192,6 +192,101 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         z.writestr('ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx', workbook_bytes)
 
 
+def _make_minimal_pptx_with_sections(path: str) -> None:
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+        '<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+        '<Override PartName="/ppt/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+        '<Override PartName="/ppt/charts/style1.xml" ContentType="application/vnd.ms-office.chartstyle+xml"/>'
+        '<Override PartName="/ppt/charts/colors1.xml" ContentType="application/vnd.ms-office.chartcolorstyle+xml"/>'
+        '<Override PartName="/ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>'
+        '</Types>'
+    ).encode('utf-8')
+
+    presentation = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<p:presentation xmlns:p="{P_NS}" xmlns:r="{R_NS}" xmlns:p14="{edmod.P14_NS}">'
+        '<p:sldIdLst>'
+        '<p:sldId id="256" r:id="rId1"/>'
+        '<p:sldId id="257" r:id="rId2"/>'
+        '</p:sldIdLst>'
+        '<p:extLst><p:ext uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}">'
+        '<p14:sectionLst>'
+        '<p14:section name="main" id="{11111111-1111-1111-1111-111111111111}"><p14:sldIdLst><p14:sldId id="256"/></p14:sldIdLst></p14:section>'
+        '<p14:section name="template_slides" id="{22222222-2222-2222-2222-222222222222}"><p14:sldIdLst><p14:sldId id="257"/></p14:sldIdLst></p14:section>'
+        '</p14:sectionLst>'
+        '</p:ext></p:extLst>'
+        '</p:presentation>'
+    ).encode('utf-8')
+
+    presentation_rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>'
+        '</Relationships>'
+    ).encode('utf-8')
+
+    slide1 = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}">'
+        '<p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Keep"/></p:nvSpPr></p:sp></p:spTree></p:cSld>'
+        '</p:sld>'
+    ).encode('utf-8')
+
+    slide2 = (
+        f'<?xml version="1.0" encoding="UTF-8"?>'
+        f'<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}">'
+        '<p:cSld><p:spTree><p:graphicFrame>'
+        '<p:nvGraphicFramePr><p:cNvPr id="5" name="TemplateChart"/></p:nvGraphicFramePr>'
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">'
+        f'<c:chart xmlns:c="{edmod.C_NS}" xmlns:r="{R_NS}" r:id="rId1"/>'
+        '</a:graphicData></a:graphic>'
+        '</p:graphicFrame></p:spTree></p:cSld>'
+        '</p:sld>'
+    ).encode('utf-8')
+
+    slide2_rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>'
+        '</Relationships>'
+    ).encode('utf-8')
+
+    chart_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<c:chartSpace xmlns:c="{edmod.C_NS}" xmlns:r="{R_NS}"><c:chart><c:plotArea/></c:chart></c:chartSpace>'
+    ).encode('utf-8')
+
+    chart_rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/Microsoft_Excel_Worksheet1.xlsx"/>'
+        '<Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/>'
+        '<Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/>'
+        '</Relationships>'
+    ).encode('utf-8')
+
+    wb = Workbook()
+    out = BytesIO()
+    wb.save(out)
+
+    with zipfile.ZipFile(path, 'w') as z:
+        z.writestr('[Content_Types].xml', content_types)
+        z.writestr('ppt/presentation.xml', presentation)
+        z.writestr('ppt/_rels/presentation.xml.rels', presentation_rels)
+        z.writestr('ppt/slides/slide1.xml', slide1)
+        z.writestr('ppt/slides/slide2.xml', slide2)
+        z.writestr('ppt/slides/_rels/slide2.xml.rels', slide2_rels)
+        z.writestr('ppt/charts/chart1.xml', chart_xml)
+        z.writestr('ppt/charts/_rels/chart1.xml.rels', chart_rels)
+        z.writestr('ppt/charts/style1.xml', b'<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle"/>')
+        z.writestr('ppt/charts/colors1.xml', b'<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle"/>')
+        z.writestr('ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx', out.getvalue())
+
+
 def test_import():
     import xmlppt
 
@@ -212,6 +307,33 @@ def test_textbox_find_and_edit(tmp_path):
     slide_xml = editor.files['ppt/slides/slide1.xml'].decode('utf-8')
     assert 'New' in slide_xml
     assert 'Line' in slide_xml
+
+
+def test_drop_section_removes_section_slides_and_private_parts(tmp_path):
+    pptx = tmp_path / 'test_sections.pptx'
+    _make_minimal_pptx_with_sections(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    removed = editor.drop_section('template_slides')
+
+    assert removed == [2]
+    assert 'ppt/slides/slide1.xml' in editor.files
+    assert 'ppt/slides/slide2.xml' not in editor.files
+    assert 'ppt/slides/_rels/slide2.xml.rels' not in editor.files
+    assert 'ppt/charts/chart1.xml' not in editor.files
+    assert 'ppt/charts/style1.xml' not in editor.files
+    assert 'ppt/charts/colors1.xml' not in editor.files
+    assert 'ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx' not in editor.files
+
+    presentation_xml = editor.files['ppt/presentation.xml'].decode('utf-8')
+    presentation_rels = editor.files['ppt/_rels/presentation.xml.rels'].decode('utf-8')
+    content_types = editor.files['[Content_Types].xml'].decode('utf-8')
+
+    assert 'template_slides' not in presentation_xml
+    assert 'slide2.xml' not in presentation_xml
+    assert 'slide2.xml' not in presentation_rels
+    assert '/ppt/slides/slide2.xml' not in content_types
+    assert '/ppt/charts/chart1.xml' not in content_types
 
 
 def test_table_find_and_edit_cell(tmp_path):
@@ -296,6 +418,50 @@ def test_embedded_workbook_for_chart_on_slide(tmp_path):
     sheet = loaded_wb['Sheet1']
     assert sheet['A2'].value == 'CatA'
     assert sheet['B3'].value == 200
+
+
+def test_chart_data_multi_series_edit(tmp_path):
+    pptx = tmp_path / 'test_multi_series_chart.pptx'
+    _make_minimal_pptx_with_chart(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    chart_root = etree.fromstring(editor.files['ppt/charts/chart1.xml'])
+    first_series = chart_root.xpath('.//c:barChart/c:ser', namespaces=edmod.NS)[0]
+    first_series.getparent().append(etree.fromstring(etree.tostring(first_series)))
+    editor.files['ppt/charts/chart1.xml'] = etree.tostring(chart_root, xml_declaration=True, encoding='UTF-8', standalone='yes')
+
+    editor.edit_chart_data_multi_series_on_slide(
+        slide_number=1,
+        chart_name='TestChart',
+        categories=['Q1', 'Q2', 'Q3'],
+        series={
+            'Revenue': [10, 20, 30],
+            'Cost': [4, 8, 12],
+        },
+    )
+
+    chart_xml = editor.files['ppt/charts/chart1.xml'].decode('utf-8')
+    assert 'Sheet1!$A$2:$A$4' in chart_xml
+    assert 'Sheet1!$B$2:$B$4' in chart_xml
+    assert 'Sheet1!$C$2:$C$4' in chart_xml
+    assert '30' in chart_xml
+    assert '12' in chart_xml
+
+    rels = etree.fromstring(editor.files['ppt/charts/_rels/chart1.xml.rels'])
+    workbook_target = rels.xpath(
+        "./pr:Relationship[@Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/package']/@Target",
+        namespaces=edmod.NS,
+    )[0]
+    workbook_path = PowerPointEditor._normalize_relationship_target('ppt/charts/chart1.xml', workbook_target)
+    loaded_wb = load_workbook(BytesIO(editor.files[workbook_path]))
+    sheet = loaded_wb['Sheet1']
+
+    assert sheet['A1'].value == 'Category'
+    assert sheet['B1'].value == 'Revenue'
+    assert sheet['C1'].value == 'Cost'
+    assert sheet['A4'].value == 'Q3'
+    assert sheet['B4'].value == 30
+    assert sheet['C4'].value == 12
 
 
 def test_duplicate_chart_slide_copies_chart_style_parts(tmp_path):
