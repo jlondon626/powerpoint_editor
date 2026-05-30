@@ -293,6 +293,18 @@ def test_import():
     assert hasattr(xmlppt, 'PowerPointEditor')
 
 
+def test_get_slide_returns_proxy(tmp_path):
+    pptx = tmp_path / 'test_proxy.pptx'
+    _make_minimal_pptx(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    slide = editor.get_slide(1)
+
+    assert slide.slide_number == 1
+    slide.edit_textbox('TestBox', 'Updated through proxy')
+    assert 'Updated through proxy' in editor.files['ppt/slides/slide1.xml'].decode('utf-8')
+
+
 def test_textbox_find_and_edit(tmp_path):
     pptx = tmp_path / 'test.pptx'
     _make_minimal_pptx(str(pptx))

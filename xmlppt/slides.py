@@ -1,6 +1,7 @@
 from lxml import etree
 import posixpath
 from .constants import *
+from .slide_proxy import SlideProxy
 
 
 class SlideSectionMixin:
