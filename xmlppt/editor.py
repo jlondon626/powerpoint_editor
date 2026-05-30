@@ -5,6 +5,9 @@ import posixpath
 from io import BytesIO
 from openpyxl import load_workbook
 import win32com.client
+import win32con
+import win32file
+import msvcrt
 import os
 
 
@@ -36,6 +39,8 @@ REL_TYPE_CHART = "http://schemas.openxmlformats.org/officeDocument/2006/relation
 REL_TYPE_PACKAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package"
 REL_TYPE_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
 REL_TYPE_HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+REL_TYPE_CHART_STYLE = "http://schemas.microsoft.com/office/2011/relationships/chartStyle"
+REL_TYPE_CHART_COLOR_STYLE = "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"
 
 SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
 
@@ -49,6 +54,17 @@ class PowerPointEditor:
     """
 
     def __init__(self, input_pptx: str):
+        """Initialize the editor and load PPTX parts into memory.
+
+        Args:
+            input_pptx: Path to a .pptx file to open.
+
+        After initialization the instance exposes:
+            - `input_pptx`: the original path
+            - `files`: dict mapping package part paths to bytes
+            - `_has_changes`: bool indicating unsaved modifications
+        """
+
         self.input_pptx = input_pptx
         self.files = self._load_pptx_files(input_pptx)
         self._has_changes = False
@@ -60,8 +76,38 @@ class PowerPointEditor:
         return posixpath.normpath(posixpath.join(base_dir, target))
 
     def _load_pptx_files(self, pptx_path: str) -> dict[str, bytes]:
+        if os.name == "nt":
+            try:
+                return self._load_pptx_files_windows_shared(pptx_path)
+            except Exception:
+                pass
+
         with ZipFile(pptx_path, "r") as archive:
             return {name: archive.read(name) for name in archive.namelist()}
+
+    def _load_pptx_files_windows_shared(self, pptx_path: str) -> dict[str, bytes]:
+        """Open a PPTX with Windows shared read access so the file can be read
+        even when PowerPoint has it open.
+        """
+        handle = win32file.CreateFile(
+            os.path.abspath(pptx_path),
+            win32file.GENERIC_READ,
+            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE | win32con.FILE_SHARE_DELETE,
+            None,
+            win32con.OPEN_EXISTING,
+            win32con.FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+
+        try:
+            fd = msvcrt.open_osfhandle(handle.Detach(), os.O_RDONLY)
+        except Exception:
+            handle.Close()
+            raise
+
+        with os.fdopen(fd, "rb") as shared_file:
+            with ZipFile(shared_file, "r") as archive:
+                return {name: archive.read(name) for name in archive.namelist()}
 
     def _write_pptx_files(self, output_pptx: str) -> None:
         with ZipFile(output_pptx, "w") as archive:
@@ -73,6 +119,17 @@ class PowerPointEditor:
         return f"{base}_updated{ext}"
 
     def save(self, output_pptx: str | None = None) -> str:
+        """Write the in-memory PPTX package back to disk.
+
+        Args:
+            output_pptx: Optional output filename. If omitted, a new file
+                is created by appending `_updated` before the extension of
+                the input file.
+
+        Returns:
+            The path to the written output file.
+        """
+
         if output_pptx is None:
             output_pptx = self._default_output_name(self.input_pptx)
 
@@ -280,10 +337,32 @@ class PowerPointEditor:
             new_part = self._next_numbered_part_name("ppt/charts", "chart", ".xml")
         elif rel_type == REL_TYPE_PACKAGE:
             new_part = self._next_numbered_part_name("ppt/embeddings", "Microsoft_Excel_Worksheet", ".xlsx")
+        elif rel_type == REL_TYPE_CHART_STYLE:
+            new_part = self._next_numbered_part_name("ppt/charts", "style", ".xml")
+        elif rel_type == REL_TYPE_CHART_COLOR_STYLE:
+            new_part = self._next_numbered_part_name("ppt/charts", "colors", ".xml")
         else:
             return None
 
         self._deep_copy_part(source_part, new_part)
+
+        # Ensure copied parts are registered in [Content_Types].xml so PowerPoint
+        # does not mark the package as corrupt when new chart/embed parts are added.
+        if rel_type == REL_TYPE_CHART:
+            chart_content_type = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+            self._add_content_type_override(new_part, chart_content_type)
+        elif rel_type == REL_TYPE_PACKAGE:
+            # Embedded workbooks generally use the default .xlsx mapping, but
+            # adding an explicit override is harmless and keeps the package
+            # consistent when new embedding parts are created.
+            pkg_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            self._add_content_type_override(new_part, pkg_content_type)
+        elif rel_type == REL_TYPE_CHART_STYLE:
+            style_content_type = "application/vnd.ms-office.chartstyle+xml"
+            self._add_content_type_override(new_part, style_content_type)
+        elif rel_type == REL_TYPE_CHART_COLOR_STYLE:
+            color_style_content_type = "application/vnd.ms-office.chartcolorstyle+xml"
+            self._add_content_type_override(new_part, color_style_content_type)
 
         dest_folder = posixpath.dirname(dest_part)
         return posixpath.relpath(new_part, dest_folder)
@@ -327,6 +406,18 @@ class PowerPointEditor:
 
     # Template slide lookup and duplication
     def find_slide_by_shape_name(self, shape_name: str) -> int:
+        """Locate the first slide that contains a shape with `name` equal to `shape_name`.
+
+        Args:
+            shape_name: The shape `cNvPr/@name` to search for (case-insensitive).
+
+        Returns:
+            The slide number (1-based) containing a matching shape.
+
+        Raises:
+            ValueError: if no slide contains a shape with the given name.
+        """
+
         wanted = shape_name.strip().casefold()
 
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
@@ -356,6 +447,16 @@ class PowerPointEditor:
         raise ValueError(f"Slide marker shape named '{shape_name}' not found")
 
     def remove_shape_on_slide(self, slide_number: int, shape_name: str) -> None:
+        """Remove the first shape (or graphicFrame) with the given name on a slide.
+
+        Args:
+            slide_number: 1-based slide index.
+            shape_name: Shape `cNvPr/@name` to remove (case-insensitive).
+
+        Raises:
+            FileNotFoundError: if the slide part does not exist.
+        """
+
         wanted = shape_name.strip().casefold()
         slide_part = f"ppt/slides/slide{slide_number}.xml"
 
@@ -398,6 +499,20 @@ class PowerPointEditor:
         if source_slide_part not in self.files:
             raise FileNotFoundError(f"Template slide not found: {source_slide_part}")
 
+        """Duplicate a slide within the package.
+
+        Args:
+            template_slide_number: The slide number to copy.
+            before_section_name: Optional section name to insert the new
+                slide before; if omitted the slide is appended to the end.
+
+        Returns:
+            The inserted slide number (int).
+
+        Raises:
+            FileNotFoundError: if the template slide does not exist.
+        """
+
         new_slide_number, new_slide_part = self._next_slide_part()
 
         self._deep_copy_part(source_slide_part, new_slide_part)
@@ -408,7 +523,22 @@ class PowerPointEditor:
         self._has_changes = True
         return inserted_slide_number
 
-    def duplicate_template_slide(self, template_name: str, before_section_name: str = "template_slides") -> int:
+    def duplicate_template_slide(self, template_name: str, before_section_name: str = "template_slides") -> "SlideProxy":
+        """Duplicate a named template slide.
+
+        This method looks for a shape named `TEMPLATE__<template_name>` on
+        template slides (created in PowerPoint). The found slide is copied
+        and the marker shape is removed from the new slide so it remains a
+        proper generated slide.
+
+        Args:
+            template_name: Logical template identifier (without the `TEMPLATE__` prefix).
+            before_section_name: Section name to insert generated slide before.
+
+        Returns:
+            A `SlideProxy` bound to the newly inserted slide.
+        """
+
         marker_shape_name = f"TEMPLATE__{template_name}"
 
         template_slide_number = self.find_slide_by_shape_name(marker_shape_name)
@@ -418,7 +548,19 @@ class PowerPointEditor:
         # Remove marker from generated slide so future lookups only find template slides.
         self.remove_shape_on_slide(slide_number=new_slide_number, shape_name=marker_shape_name)
 
-        return new_slide_number
+        # Return a bound SlideProxy for convenient chained edits.
+        return self.get_slide(new_slide_number)
+
+    def get_slide(self, slide_number: int) -> "SlideProxy":
+        """Return a small helper proxy bound to `slide_number` so edit operations
+        can be called directly on the returned object.
+
+        Example:
+            slide = editor.get_slide(5)
+            slide.edit_textbox('Title', 'Hello')
+        """
+        return SlideProxy(self, slide_number)
+
 
     # Textbox editing
     def _find_textbox_shape_in_slide(self, slide_root, textbox_name: str):
@@ -493,6 +635,18 @@ class PowerPointEditor:
         return paragraphs
 
     def find_textbox_anywhere(self, textbox_name: str) -> dict:
+        """Find the first textbox (shape) with the given name anywhere in the presentation.
+
+        Args:
+            textbox_name: The textbox `cNvPr/@name` to locate (case-insensitive).
+
+        Returns:
+            A dict containing `slide_number` and `slide_part` for the found textbox.
+
+        Raises:
+            ValueError: if no matching textbox is found.
+        """
+
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
         slide_parts.sort(key=lambda item: item[0])
 
@@ -509,6 +663,18 @@ class PowerPointEditor:
         raise ValueError(f"Textbox named '{textbox_name}' not found anywhere in presentation")
 
     def edit_textbox_on_slide(self, slide_number: int, textbox_name: str, new_text: str) -> None:
+        """Replace the text of a textbox on a specific slide.
+
+        Args:
+            slide_number: 1-based slide index where the textbox lives.
+            textbox_name: The textbox `cNvPr/@name` to edit (case-insensitive).
+            new_text: Plain text to write; newline characters create new paragraphs.
+
+        Raises:
+            FileNotFoundError: if the slide part is missing.
+            ValueError: if the named textbox or text body is not found.
+        """
+
         slide_part = f"ppt/slides/slide{slide_number}.xml"
 
         if slide_part not in self.files:
@@ -532,6 +698,17 @@ class PowerPointEditor:
         self._has_changes = True
 
     def edit_textbox_html_on_slide(self, slide_number: int, textbox_name: str, html: str) -> None:
+        """Edit a textbox on a slide using a small subset of HTML-like markup.
+
+        Supported tags: `<b>...</b>` for bold and `<br/>` for line breaks. Text
+        is converted into presentation runs and paragraphs.
+
+        Args:
+            slide_number: 1-based slide index.
+            textbox_name: The textbox name to edit.
+            html: Markup string to parse and insert.
+        """
+
         slide_part = f"ppt/slides/slide{slide_number}.xml"
 
         if slide_part not in self.files:
@@ -555,6 +732,15 @@ class PowerPointEditor:
         self._has_changes = True
 
     def edit_textbox_runs_on_slide(self, slide_number: int, textbox_name: str, paragraphs: list[list[tuple[str, bool]]]) -> None:
+        """Edit a textbox by supplying explicit run structures.
+
+        Args:
+            slide_number: 1-based slide index.
+            textbox_name: The textbox name to edit.
+            paragraphs: A list of paragraphs, each paragraph is a list of
+                `(text, bold)` tuples where `bold` is a bool.
+        """
+
         slide_part = f"ppt/slides/slide{slide_number}.xml"
 
         if slide_part not in self.files:
@@ -578,15 +764,42 @@ class PowerPointEditor:
 
     # Backward-compatible anywhere methods
     def edit_textbox(self, textbox_name: str, new_text: str) -> None:
+        """Backward-compatible helper: find and edit the first matching textbox.
+
+        Args:
+            textbox_name: The textbox name to locate and edit.
+            new_text: Plain text to insert.
+        """
+
         found = self.find_textbox_anywhere(textbox_name)
         self.edit_textbox_on_slide(found["slide_number"], textbox_name, new_text)
 
     def edit_textbox_html(self, textbox_name: str, html: str) -> None:
+        """Backward-compatible helper: find a textbox and edit it with HTML markup.
+
+        Args:
+            textbox_name: The textbox name to locate.
+            html: Markup string to insert into the textbox.
+        """
+
         found = self.find_textbox_anywhere(textbox_name)
         self.edit_textbox_html_on_slide(found["slide_number"], textbox_name, html)
 
     # Chart lookup/editing
     def find_chart_on_slide(self, slide_number: int, chart_name: str) -> dict:
+        """Locate a chart on a specific slide by shape name.
+
+        Args:
+            slide_number: 1-based slide index to search.
+            chart_name: The shape name of the chart (case-insensitive).
+
+        Returns:
+            Dict containing `slide_number`, `slide_part`, `chart_part`, `rel_id`, and `chart_kind`.
+
+        Raises:
+            FileNotFoundError or ValueError when parts or chart are missing.
+        """
+
         wanted = chart_name.strip().casefold()
 
         slide_part = f"ppt/slides/slide{slide_number}.xml"
@@ -643,6 +856,15 @@ class PowerPointEditor:
         raise ValueError(f"Chart named '{chart_name}' not found on slide {slide_number}")
 
     def find_chart_anywhere(self, chart_name: str) -> dict:
+        """Find the first chart in the presentation with the given name.
+
+        Args:
+            chart_name: Chart shape name to search for (case-insensitive).
+
+        Returns:
+            The same dict returned by `find_chart_on_slide`.
+        """
+
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
         slide_parts.sort(key=lambda item: item[0])
 
@@ -690,6 +912,52 @@ class PowerPointEditor:
                 return self._normalize_relationship_target(chart_part, rel.get("Target", ""))
 
         return None
+
+    def _chart_rels_part(self, chart_part: str) -> str:
+        return f"{posixpath.dirname(chart_part)}/_rels/{posixpath.basename(chart_part)}.rels"
+
+    def _quote_sheet_name_for_formula(self, sheet_name: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", sheet_name):
+            return sheet_name
+
+        escaped = sheet_name.replace("'", "''")
+        return f"'{escaped}'"
+
+    def _update_embedded_workbook(self, workbook_target: str, categories: list[str], values: list[float], sheet_name: str | None = None) -> str:
+        if workbook_target not in self.files:
+            raise FileNotFoundError(f"Embedded workbook not found: {workbook_target}")
+
+        wb_bytes = BytesIO(self.files[workbook_target])
+        wb = load_workbook(wb_bytes)
+        sheet = wb[sheet_name] if sheet_name else wb.active
+
+        start_row = 2
+        end_row = max(sheet.max_row, len(categories) + 1)
+
+        for row in range(start_row, end_row + 1):
+            sheet[f"A{row}"] = None
+            sheet[f"B{row}"] = None
+
+        for row_index, (category, value) in enumerate(zip(categories, values), start=start_row):
+            sheet[f"A{row_index}"] = category
+            sheet[f"B{row_index}"] = value
+
+        out_wb = BytesIO()
+        wb.save(out_wb)
+        self.files[workbook_target] = out_wb.getvalue()
+
+        return sheet.title
+
+    def _update_regular_chart_formula_ranges(self, chart_root, sheet_name: str, point_count: int) -> None:
+        quoted_sheet_name = self._quote_sheet_name_for_formula(sheet_name)
+        category_range = f"{quoted_sheet_name}!$A$2:$A${point_count + 1}"
+        value_range = f"{quoted_sheet_name}!$B$2:$B${point_count + 1}"
+
+        for formula in chart_root.xpath(".//c:cat//c:strRef/c:f", namespaces=NS):
+            formula.text = category_range
+
+        for formula in chart_root.xpath(".//c:val//c:numRef/c:f", namespaces=NS):
+            formula.text = value_range
 
     def _update_chartex_chart(self, chart_root, categories: list[str], values: list[float], subtotal_indices: list[int] | None = None) -> None:
         cat_lvl = chart_root.xpath("//cx:strDim[@type='cat']/cx:lvl", namespaces=NS)
@@ -744,7 +1012,22 @@ class PowerPointEditor:
         if num_caches:
             self._replace_num_cache(num_caches[0], values)
 
-    def edit_waterfall_data_on_slide(self, slide_number: int, chart_name: str, categories: list[str], values: list[float]) -> None:
+    def edit_chart_data_on_slide(self, slide_number: int, chart_name: str, categories: list[str], values: list[float]) -> None:
+        """Update the data caches for a regular chart on a slide.
+
+        This updates the string and numeric caches embedded in the chart XML so
+        the chart will display the supplied `categories` and `values`.
+
+        Args:
+            slide_number: 1-based slide index.
+            chart_name: Chart shape name on the slide.
+            categories: List of category labels (strings).
+            values: List of numeric values (floats).
+
+        Raises:
+            ValueError: if lengths mismatch or expected caches are not found.
+        """
+
         if len(categories) != len(values):
             raise ValueError("categories and values must have the same length")
 
@@ -765,18 +1048,57 @@ class PowerPointEditor:
         self._replace_str_cache(str_cache_nodes[0], categories)
         self._replace_num_cache(num_cache_nodes[0], values)
 
+        rels_part = self._chart_rels_part(chart_part)
+        if rels_part in self.files:
+            rels_root = etree.fromstring(self.files[rels_part])
+            workbook_target = self._get_embedded_workbook_target(chart_part, rels_root)
+            if workbook_target:
+                actual_sheet_name = self._update_embedded_workbook(
+                    workbook_target=workbook_target,
+                    categories=categories,
+                    values=values,
+                )
+                self._update_regular_chart_formula_ranges(
+                    chart_root=chart_root,
+                    sheet_name=actual_sheet_name,
+                    point_count=len(categories),
+                )
+
         self.files[chart_part] = etree.tostring(chart_root, xml_declaration=True, encoding="UTF-8", standalone="yes")
 
         self._has_changes = True
 
+    def edit_waterfall_data_on_slide(self, slide_number: int, chart_name: str, categories: list[str], values: list[float]) -> None:
+        """Backward-compatible alias for `edit_chart_data_on_slide`."""
+        return self.edit_chart_data_on_slide(slide_number=slide_number, chart_name=chart_name, categories=categories, values=values)
+
     def edit_embedded_workbook_for_chart_on_slide(self, slide_number: int, chart_name: str, categories: list[str], values: list[float], sheet_name: str | None = None, subtotal_indices: list[int] | None = None) -> None:
+        """Update the embedded Excel workbook for a chart and adjust chart XML.
+
+        This writes `categories` and `values` into the embedded workbook (Sheet1
+        or named sheet) and updates the chart caches so the chart will reflect
+        the new workbook contents. If the chart is a 'chartex' type, subtotal
+        indices may be applied.
+
+        Args:
+            slide_number: 1-based slide index.
+            chart_name: Chart shape name on the slide.
+            categories: List of category labels.
+            values: List of numeric values.
+            sheet_name: Optional sheet name to target in the workbook.
+            subtotal_indices: Optional list of subtotal index integers (for chartex)
+
+        Raises:
+            ValueError: if lengths mismatch or embedded workbook/chart parts missing.
+        """
+
         if len(categories) != len(values):
             raise ValueError("categories and values must have the same length")
 
         found = self.find_chart_on_slide(slide_number, chart_name)
         chart_part = found["chart_part"]
 
-        rels_part = f"{posixpath.dirname(chart_part)}/_rels/{posixpath.basename(chart_part)}.rels"
+        rels_part = self._chart_rels_part(chart_part)
 
         if rels_part not in self.files:
             raise FileNotFoundError(f"Chart rels part not found: {rels_part}")
@@ -787,44 +1109,41 @@ class PowerPointEditor:
         if not workbook_target:
             raise ValueError("No embedded workbook relationship found for this chart")
 
-        if workbook_target not in self.files:
-            raise FileNotFoundError(f"Embedded workbook not found: {workbook_target}")
-
-        wb_bytes = BytesIO(self.files[workbook_target])
-        wb = load_workbook(wb_bytes)
-        sheet = wb[sheet_name] if sheet_name else wb.active
-
-        start_row = 2
-        end_row = max(sheet.max_row, len(categories) + 1)
-
-        for row in range(start_row, end_row + 1):
-            sheet[f"A{row}"] = None
-            sheet[f"B{row}"] = None
-
-        for row_index, (category, value) in enumerate(zip(categories, values), start=start_row):
-            sheet[f"A{row_index}"] = category
-            sheet[f"B{row_index}"] = value
-
-        out_wb = BytesIO()
-        wb.save(out_wb)
-        self.files[workbook_target] = out_wb.getvalue()
+        actual_sheet_name = self._update_embedded_workbook(
+            workbook_target=workbook_target,
+            categories=categories,
+            values=values,
+            sheet_name=sheet_name,
+        )
 
         chart_root = etree.fromstring(self.files[chart_part])
 
         self._update_chartex_chart(chart_root=chart_root, categories=categories, values=values, subtotal_indices=subtotal_indices)
 
         self._update_regular_chart_cache(chart_root=chart_root, categories=categories, values=values)
+        self._update_regular_chart_formula_ranges(chart_root=chart_root, sheet_name=actual_sheet_name, point_count=len(categories))
 
         self.files[chart_part] = etree.tostring(chart_root, xml_declaration=True, encoding="UTF-8", standalone="yes")
 
         self._has_changes = True
 
     # Backward-compatible anywhere methods
-    def edit_waterfall_data(self, chart_name: str, categories: list[str], values: list[float]) -> None:
+    def edit_chart_data(self, chart_name: str, categories: list[str], values: list[float]) -> None:
+        """Find a chart by name anywhere and update its regular chart data caches."""
+
         found = self.find_chart_anywhere(chart_name)
-        self.edit_waterfall_data_on_slide(slide_number=found["slide_number"], chart_name=chart_name, categories=categories, values=values)
+        self.edit_chart_data_on_slide(slide_number=found["slide_number"], chart_name=chart_name, categories=categories, values=values)
+
+    def edit_waterfall_data(self, chart_name: str, categories: list[str], values: list[float]) -> None:
+        """Backward-compatible alias for `edit_chart_data`."""
+        return self.edit_chart_data(chart_name=chart_name, categories=categories, values=values)
 
     def edit_embedded_workbook_for_chart(self, chart_name: str, categories: list[str], values: list[float], sheet_name: str | None = None, subtotal_indices: list[int] | None = None) -> None:
+        """Find a chart by name anywhere and update its embedded workbook.
+
+        Args are the same as `edit_embedded_workbook_for_chart_on_slide`.
+        """
+
         found = self.find_chart_anywhere(chart_name)
         self.edit_embedded_workbook_for_chart_on_slide(slide_number=found["slide_number"], chart_name=chart_name, categories=categories, values=values, sheet_name=sheet_name, subtotal_indices=subtotal_indices)
 
@@ -861,10 +1180,28 @@ class PowerPointEditor:
                 pass
 
     def refresh_chart(self, chart_name: str, output_pptx: str) -> None:
+        """Attempt to refresh a chart using PowerPoint COM automation.
+
+        This opens the `output_pptx` in a PowerPoint COM instance and calls
+        `.Refresh()` on the matching chart shape. This requires PowerPoint to
+        be available on the host (Windows) and may be a no-op if COM automation
+        fails.
+
+        Args:
+            chart_name: The shape name of the chart in PowerPoint.
+            output_pptx: Path to the file to open in PowerPoint.
+        """
+
         self._refresh_powerpoint_chart(output_pptx, chart_name)
 
     # Debug/listing utilities
     def list_all_textboxes(self) -> None:
+        """Print all named textboxes found in the presentation.
+
+        This helper iterates slides and prints `cNvPr/@name` for shapes that
+        contain a text body. Intended as a debugging utility.
+        """
+
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
         slide_parts.sort(key=lambda item: item[0])
 
@@ -883,6 +1220,8 @@ class PowerPointEditor:
                     print(f"Slide {slide_number}: Textbox name={name!r}")
 
     def list_graphic_frames(self) -> None:
+        """Print graphic frames (charts/tables) found on each slide for debugging."""
+
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
         slide_parts.sort(key=lambda item: item[0])
 
@@ -907,6 +1246,8 @@ class PowerPointEditor:
                 )
 
     def list_sections(self) -> None:
+        """Print section names and slide counts from the presentation manifest."""
+
         presentation_root = etree.fromstring(self.files["ppt/presentation.xml"])
         sections = presentation_root.xpath(".//p14:section", namespaces=NS)
 
@@ -920,6 +1261,12 @@ class PowerPointEditor:
             print(f"{index}. {name!r}: {len(slide_ids)} slides")
 
     def dump_chartex_debug(self, chart_name: str) -> None:
+        """Debug helper: print raw chartex chart XML and rels for a chart.
+
+        Args:
+            chart_name: Name of the chart to dump.
+        """
+
         found = self.find_chart_anywhere(chart_name)
         chart_part = found["chart_part"]
         chart_filename = posixpath.basename(chart_part)
@@ -947,7 +1294,16 @@ class PowerPointEditor:
     def find_table_on_slide(self, slide_number: int, table_name: str) -> dict:
         """Locate a table (graphicFrame containing an a:tbl) by its shape name on a slide.
 
-        Returns a dict with slide_number and slide_part if found.
+        Args:
+            slide_number: 1-based slide index to search.
+            table_name: The shape name of the table (case-insensitive).
+
+        Returns:
+            Dict with `slide_number` and `slide_part` for the found table.
+
+        Raises:
+            FileNotFoundError: if the slide part is missing.
+            ValueError: if the named table is not found.
         """
         wanted = table_name.strip().casefold()
 
@@ -979,6 +1335,15 @@ class PowerPointEditor:
         raise ValueError(f"Table named '{table_name}' not found on slide {slide_number}")
 
     def find_table_anywhere(self, table_name: str) -> dict:
+        """Find the first table with the given name anywhere in the presentation.
+
+        Args:
+            table_name: Table shape name to locate.
+
+        Returns:
+            Dict returned by `find_table_on_slide`.
+        """
+
         slide_parts = [(int(match.group(1)), name) for name in self.files if (match := SLIDE_RE.match(name))]
         slide_parts.sort(key=lambda item: item[0])
 
@@ -996,7 +1361,19 @@ class PowerPointEditor:
         self._replace_textbox_runs(txBody_elem, paragraphs)
 
     def edit_table_cell_on_slide(self, slide_number: int, table_name: str, row: int, col: int, new_text: str) -> None:
-        """Edit a single table cell by 0-based `row` and `col` indices on a slide."""
+        """Edit a single table cell by 0-based `row` and `col` indices on a slide.
+
+        Args:
+            slide_number: 1-based slide index containing the table.
+            table_name: Table shape name to locate.
+            row: Zero-based row index within the table.
+            col: Zero-based column index within the row.
+            new_text: Text to write into the cell.
+
+        Raises:
+            IndexError: if row/col are out of range.
+            ValueError/FileNotFoundError when table or slide parts are missing.
+        """
         info = self.find_table_on_slide(slide_number, table_name)
         slide_part = info['slide_part']
 
@@ -1040,7 +1417,16 @@ class PowerPointEditor:
         raise ValueError(f"Table named '{table_name}' not found on slide {slide_number}")
 
     def edit_table_range_on_slide(self, slide_number: int, table_name: str, data: list[list[str]]) -> None:
-        """Write a 2D list of strings into a table on a slide. Rows/cols must fit the table."""
+        """Write a 2D list of strings into a table on a slide.
+
+        Args:
+            slide_number: 1-based slide index containing the table.
+            table_name: Table shape name to locate.
+            data: 2D list of strings where each inner list is a table row.
+
+        Raises:
+            ValueError: if provided data exceeds table dimensions.
+        """
         info = self.find_table_on_slide(slide_number, table_name)
         slide_part = info['slide_part']
 
@@ -1083,3 +1469,50 @@ class PowerPointEditor:
             return
 
         raise ValueError(f"Table named '{table_name}' not found on slide {slide_number}")
+
+
+class SlideProxy:
+    """A small convenience wrapper bound to a single slide number.
+
+    Use `editor.get_slide(n)` to obtain an instance. Methods on the proxy
+    delegate to the corresponding `PowerPointEditor` methods with the
+    bound slide number.
+    """
+
+    def __init__(self, editor: "PowerPointEditor", slide_number: int):
+        self._editor = editor
+        self.slide_number = slide_number
+
+    def edit_textbox(self, textbox_name: str, new_text: str) -> None:
+        return self._editor.edit_textbox_on_slide(self.slide_number, textbox_name, new_text)
+
+    def edit_textbox_html(self, textbox_name: str, html: str) -> None:
+        return self._editor.edit_textbox_html_on_slide(self.slide_number, textbox_name, html)
+
+    def edit_textbox_runs(self, textbox_name: str, paragraphs: list[list[tuple[str, bool]]]) -> None:
+        return self._editor.edit_textbox_runs_on_slide(self.slide_number, textbox_name, paragraphs)
+
+    def remove_shape(self, shape_name: str) -> None:
+        return self._editor.remove_shape_on_slide(self.slide_number, shape_name)
+
+    def edit_table_cell(self, table_name: str, row: int, col: int, new_text: str) -> None:
+        return self._editor.edit_table_cell_on_slide(self.slide_number, table_name, row, col, new_text)
+
+    def edit_table_range(self, table_name: str, data: list[list[str]]) -> None:
+        return self._editor.edit_table_range_on_slide(self.slide_number, table_name, data)
+
+    def __repr__(self) -> str:
+        return f"<SlideProxy slide_number={self.slide_number}>"
+    
+    # Chart-related helpers bound to this slide
+    def edit_chart_data(self, chart_name: str, categories: list[str], values: list[float]) -> None:
+        return self._editor.edit_chart_data_on_slide(self.slide_number, chart_name, categories, values)
+
+    def edit_waterfall_data(self, chart_name: str, categories: list[str], values: list[float]) -> None:
+        return self.edit_chart_data(chart_name, categories, values)
+
+    def edit_embedded_workbook_for_chart(self, chart_name: str, categories: list[str], values: list[float], sheet_name: str | None = None, subtotal_indices: list[int] | None = None) -> None:
+        return self._editor.edit_embedded_workbook_for_chart_on_slide(self.slide_number, chart_name, categories, values, sheet_name=sheet_name, subtotal_indices=subtotal_indices)
+
+    def refresh_chart(self, chart_name: str, output_pptx: str) -> None:
+        return self._editor.refresh_chart(chart_name, output_pptx)

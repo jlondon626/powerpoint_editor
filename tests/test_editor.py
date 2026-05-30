@@ -85,6 +85,8 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
         '<Override PartName="/ppt/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>'
+        '<Override PartName="/ppt/charts/style1.xml" ContentType="application/vnd.ms-office.chartstyle+xml"/>'
+        '<Override PartName="/ppt/charts/colors1.xml" ContentType="application/vnd.ms-office.chartcolorstyle+xml"/>'
         '<Override PartName="/ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>'
         '</Types>'
     ).encode('utf-8')
@@ -127,6 +129,7 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         f'        <c:ser>'
         f'          <c:cat>'
         f'            <c:strRef>'
+        f'              <c:f>Sheet1!$A$2:$A$3</c:f>'
         f'              <c:strCache>'
         f'                <c:ptCount val="2"/>'
         f'                <c:pt idx="0"><c:v>One</c:v></c:pt>'
@@ -136,6 +139,7 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         f'          </c:cat>'
         f'          <c:val>'
         f'            <c:numRef>'
+        f'              <c:f>Sheet1!$B$2:$B$3</c:f>'
         f'              <c:numCache>'
         f'                <c:ptCount val="2"/>'
         f'                <c:pt idx="0"><c:v>10</c:v></c:pt>'
@@ -154,6 +158,8 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/Microsoft_Excel_Worksheet1.xlsx"/>'
+        '<Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/>'
+        '<Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2011/relationships/chartColorStyle" Target="colors1.xml"/>'
         '</Relationships>'
     ).encode('utf-8')
 
@@ -181,6 +187,8 @@ def _make_minimal_pptx_with_chart(path: str) -> None:
         ).encode('utf-8'))
         z.writestr('ppt/charts/chart1.xml', chart_xml)
         z.writestr('ppt/charts/_rels/chart1.xml.rels', chart_rels)
+        z.writestr('ppt/charts/style1.xml', b'<cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle"/>')
+        z.writestr('ppt/charts/colors1.xml', b'<cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle"/>')
         z.writestr('ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx', workbook_bytes)
 
 
@@ -234,16 +242,29 @@ def test_table_edit_range(tmp_path):
     assert 'A1' in slide_xml and 'B2' in slide_xml
 
 
-def test_waterfall_data_edit(tmp_path):
+def test_chart_data_edit(tmp_path):
     pptx = tmp_path / 'test_chart.pptx'
     _make_minimal_pptx_with_chart(str(pptx))
 
     editor = PowerPointEditor(str(pptx))
-    editor.edit_waterfall_data_on_slide(1, 'TestChart', ['NewOne', 'NewTwo'], [11, 22])
+    editor.edit_chart_data_on_slide(1, 'TestChart', ['NewOne', 'NewTwo'], [11, 22])
 
     chart_xml = editor.files['ppt/charts/chart1.xml'].decode('utf-8')
     assert 'NewOne' in chart_xml
     assert '22' in chart_xml
+    assert 'Sheet1!$A$2:$A$3' in chart_xml
+    assert 'Sheet1!$B$2:$B$3' in chart_xml
+
+    rels = etree.fromstring(editor.files['ppt/charts/_rels/chart1.xml.rels'])
+    workbook_target = rels.xpath(
+        "./pr:Relationship[@Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/package']/@Target",
+        namespaces=edmod.NS,
+    )[0]
+    workbook_path = PowerPointEditor._normalize_relationship_target('ppt/charts/chart1.xml', workbook_target)
+    loaded_wb = load_workbook(BytesIO(editor.files[workbook_path]))
+    sheet = loaded_wb['Sheet1']
+    assert sheet['A2'].value == 'NewOne'
+    assert sheet['B3'].value == 22
 
 
 def test_embedded_workbook_for_chart_on_slide(tmp_path):
@@ -264,7 +285,10 @@ def test_embedded_workbook_for_chart_on_slide(tmp_path):
     assert '200' in chart_xml
 
     rels = etree.fromstring(editor.files['ppt/charts/_rels/chart1.xml.rels'])
-    workbook_target = rels.xpath('./pr:Relationship', namespaces=edmod.NS)[0].get('Target')
+    workbook_target = rels.xpath(
+        "./pr:Relationship[@Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/package']/@Target",
+        namespaces=edmod.NS,
+    )[0]
     workbook_path = PowerPointEditor._normalize_relationship_target('ppt/charts/chart1.xml', workbook_target)
     workbook_data = editor.files[workbook_path]
 
@@ -272,3 +296,39 @@ def test_embedded_workbook_for_chart_on_slide(tmp_path):
     sheet = loaded_wb['Sheet1']
     assert sheet['A2'].value == 'CatA'
     assert sheet['B3'].value == 200
+
+
+def test_duplicate_chart_slide_copies_chart_style_parts(tmp_path):
+    pptx = tmp_path / 'test_duplicate_chart.pptx'
+    _make_minimal_pptx_with_chart(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    new_slide_number = editor.duplicate_slide(1)
+
+    assert new_slide_number == 2
+    assert 'ppt/charts/chart2.xml' in editor.files
+    assert 'ppt/charts/style2.xml' in editor.files
+    assert 'ppt/charts/colors2.xml' in editor.files
+
+    rels = etree.fromstring(editor.files['ppt/charts/_rels/chart2.xml.rels'])
+    style_target = rels.xpath(
+        "./pr:Relationship[@Type='http://schemas.microsoft.com/office/2011/relationships/chartStyle']/@Target",
+        namespaces=edmod.NS,
+    )
+    color_target = rels.xpath(
+        "./pr:Relationship[@Type='http://schemas.microsoft.com/office/2011/relationships/chartColorStyle']/@Target",
+        namespaces=edmod.NS,
+    )
+
+    assert style_target == ['style2.xml']
+    assert color_target == ['colors2.xml']
+
+    content_types = etree.fromstring(editor.files['[Content_Types].xml'])
+    assert content_types.xpath(
+        "./ct:Override[@PartName='/ppt/charts/style2.xml']",
+        namespaces=edmod.NS,
+    )
+    assert content_types.xpath(
+        "./ct:Override[@PartName='/ppt/charts/colors2.xml']",
+        namespaces=edmod.NS,
+    )

@@ -16,6 +16,10 @@ venv/
 ENV/
 env/
 
+#env files
+.env
+*.env
+
 # Distribution / packaging
 build/
 dist/
