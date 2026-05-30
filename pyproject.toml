@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xmlppt"
+version = "0.1.0"
+description = "PowerPoint editing via Open XML package manipulation"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Your Name" },
+]
+dependencies = [
+    "lxml>=4.0.0",
+    "openpyxl>=3.0.0",
+    "pywin32>=306; sys_platform == \"win32\"",
+]
+keywords = ["pptx", "powerpoint", "openxml", "slides", "excel"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+]
+
+[tool.setuptools]
+packages = ["xmlppt"]
