@@ -321,6 +321,54 @@ def test_textbox_find_and_edit(tmp_path):
     assert 'Line' in slide_xml
 
 
+def test_find_and_replace_text_variables(tmp_path):
+    pptx = tmp_path / 'test_variables.pptx'
+    _make_minimal_pptx(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    slide_root = etree.fromstring(editor.files['ppt/slides/slide1.xml'])
+    tx_body = slide_root.xpath(".//p:sp[p:nvSpPr/p:cNvPr/@name='TestBox']/p:txBody", namespaces=edmod.NS)[0]
+
+    for paragraph in tx_body.xpath("./a:p", namespaces=edmod.NS):
+        tx_body.remove(paragraph)
+
+    tx_body.append(
+        etree.fromstring(
+            (
+                f'<a:p xmlns:a="{A_NS}">'
+                '<a:r><a:t>Report for {Qu</a:t></a:r>'
+                '<a:r><a:rPr b="1"/><a:t>arter}</a:t></a:r>'
+                '<a:r><a:t> and {Missing}</a:t></a:r>'
+                '</a:p>'
+            ).encode('utf-8')
+        )
+    )
+    editor.files['ppt/slides/slide1.xml'] = etree.tostring(slide_root, xml_declaration=True, encoding='UTF-8', standalone='yes')
+
+    variables = editor.find_text_variables()
+    assert [item['variable'] for item in variables] == ['Quarter', 'Missing']
+
+    replacement_count = editor.replace_text_variables({'Quarter': 'Q1 2026'})
+    assert replacement_count == 1
+
+    slide_xml = editor.files['ppt/slides/slide1.xml'].decode('utf-8')
+    assert 'Report for Q1 2026 and {Missing}' in slide_xml
+    assert '{Quarter}' not in slide_xml
+
+
+def test_slide_proxy_replace_text_variables(tmp_path):
+    pptx = tmp_path / 'test_proxy_variables.pptx'
+    _make_minimal_pptx(str(pptx))
+
+    editor = PowerPointEditor(str(pptx))
+    editor.edit_textbox_on_slide(1, 'TestBox', '{Quarter}')
+
+    slide = editor.get_slide(1)
+    assert slide.find_text_variables()[0]['variable'] == 'Quarter'
+    assert slide.replace_text_variables({'Quarter': 'Q2 2026'}) == 1
+    assert 'Q2 2026' in editor.files['ppt/slides/slide1.xml'].decode('utf-8')
+
+
 def test_drop_section_removes_section_slides_and_private_parts(tmp_path):
     pptx = tmp_path / 'test_sections.pptx'
     _make_minimal_pptx_with_sections(str(pptx))

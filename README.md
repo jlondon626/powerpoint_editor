@@ -55,6 +55,8 @@ slide.edit_chart_data_multi_series(
 proxy = editor.get_slide(5)
 proxy.edit_textbox('Title', 'Hello')
 
+editor.replace_text_variables({'Quarter': 'Q1 2026'})
+
 editor.drop_section('template_slides')
 editor.save('output.pptx')
 ```
@@ -77,9 +79,20 @@ slide.edit_table_cell('SummaryTable', 0, 1, 'Updated')
 
 The `SlideProxy` exposes convenience methods delegating to the editor for common
 per-slide operations: `edit_textbox`, `edit_textbox_html`, `edit_textbox_runs`,
-`remove_shape`, `edit_table_cell`, `edit_table_range`, `edit_chart_data`,
+`find_text_variables`, `replace_text_variables`, `remove_shape`,
+`edit_table_cell`, `edit_table_range`, `edit_chart_data`,
 `edit_chart_data_multi_series`, `edit_waterfall_data`,
 `edit_embedded_workbook_for_chart`, and `refresh_chart`.
+
+- Find and replace text variables:
+
+```python
+variables = editor.find_text_variables()
+editor.replace_text_variables({'Quarter': 'Q1 2026', 'Region': 'EMEA'})
+
+slide = editor.get_slide(3)
+slide.replace_text_variables({'Quarter': 'Q2 2026'})
+```
 
 CLI example
 
@@ -136,6 +149,10 @@ PowerPointEditor
   - `edit_textbox_on_slide(slide_number: int, textbox_name: str, new_text: str) -> None`: Replace plain text (newlines -> paragraphs).
   - `edit_textbox_html_on_slide(slide_number: int, textbox_name: str, html: str) -> None`: Insert simple markup (`<b>` and `<br/>`).
   - `edit_textbox_runs_on_slide(slide_number: int, textbox_name: str, paragraphs: list[list[tuple[str,bool]]]) -> None`: Provide run-level `(text, bold)` paragraphs.
+  - `find_text_variables() -> list[dict]`: Find `{Variable}` placeholders in slide text across the presentation.
+  - `find_text_variables_on_slide(slide_number: int) -> list[dict]`: Find `{Variable}` placeholders on one slide.
+  - `replace_text_variables(variables: dict[str, object]) -> int`: Replace `{Variable}` placeholders across the presentation; returns replacement count.
+  - `replace_text_variables_on_slide(slide_number: int, variables: dict[str, object]) -> int`: Replace `{Variable}` placeholders on one slide.
   - Backward-compatible helpers: `edit_textbox(...)`, `edit_textbox_html(...)` operate anywhere.
 - **Chart editing**
   - `find_chart_on_slide(slide_number: int, chart_name: str) -> dict`: Locate a chart frame and return `chart_part` and rel information.

@@ -19,6 +19,12 @@ class SlideProxy:
     def edit_textbox_runs(self, textbox_name: str, paragraphs: list[list[tuple[str, bool]]]) -> None:
         return self._editor.edit_textbox_runs_on_slide(self.slide_number, textbox_name, paragraphs)
 
+    def find_text_variables(self) -> list[dict]:
+        return self._editor.find_text_variables_on_slide(self.slide_number)
+
+    def replace_text_variables(self, variables: dict[str, object]) -> int:
+        return self._editor.replace_text_variables_on_slide(self.slide_number, variables)
+
     def remove_shape(self, shape_name: str) -> None:
         return self._editor.remove_shape_on_slide(self.slide_number, shape_name)
 
